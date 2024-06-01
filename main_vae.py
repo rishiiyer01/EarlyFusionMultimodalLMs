@@ -1,5 +1,3 @@
-from net.variational_autoencoder import DenseVAE
-from net.conv_vae import ConvVAE
 from net.cdc_vae import ConvDeconvVAE
 import numpy as np
 import tensorflow as tf
@@ -46,29 +44,13 @@ if __name__ == "__main__":
     # Choose model for training
     model = None
     name = args.model + '-'
-    if args.model == 'dense':
-        model = DenseVAE(song_length= song_length,instrument_units= instrument_units,pitch_units= pitch_units,
+    model = ConvDeconvVAE(song_length= song_length,instrument_units= instrument_units,pitch_units= pitch_units,
                     learning_rate= args.lr,epochs=args.epochs,
-                            hidden_dim=512,latent_size=16)
-        model.compile(optimizer = model.optimizer,)
-        model.build(input_shape = (1,instrument_units, pitch_units, song_length))
+                            hidden_dim=512,latent_size=32)
+    model.compile(optimizer = model.optimizer,)
+    model.build(input_shape = (1, pitch_units, song_length, instrument_units))
+    x_train = tf.transpose(x_train, perm=[0, 2, 3, 1])  
 
-    elif args.model == 'conv':
-        model = ConvVAE(song_length= song_length,instrument_units= instrument_units,pitch_units= pitch_units,
-                    learning_rate= args.lr,epochs=args.epochs,
-                            hidden_dim=512,latent_size=32)
-        model.compile(optimizer = model.optimizer,)
-        model.build(input_shape = (1, pitch_units, song_length, instrument_units))
-        x_train = tf.transpose(x_train, perm=[0, 2, 3, 1])
-    
-    elif args.model == 'cdc':
-        model = ConvDeconvVAE(song_length= song_length,instrument_units= instrument_units,pitch_units= pitch_units,
-                    learning_rate= args.lr,epochs=args.epochs,
-                            hidden_dim=512,latent_size=32)
-        model.compile(optimizer = model.optimizer,)
-        model.build(input_shape = (1, pitch_units, song_length, instrument_units))
-        x_train = tf.transpose(x_train, perm=[0, 2, 3, 1])  
-    
     # Train model
     model.summary()
     history = model.fit(x_train, x_train,epochs=model.epochs,batch_size = args.batch)
