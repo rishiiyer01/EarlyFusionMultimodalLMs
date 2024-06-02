@@ -1,114 +1,103 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
+class VectorQuantizer(nn.Module):
+    def __init__(self, num_embeddings, embedding_dim, commitment_cost):
+        super(VectorQuantizer, self).__init__()
+        self.embedding_dim = embedding_dim
+        self.num_embeddings = num_embeddings
+        self.commitment_cost = commitment_cost
 
-class ConvDeconvVAE(nn.Module):
-    def __init__(self, instrument_units, pitch_units, song_length, learning_rate, latent_size=256, hidden_dim=512):
-        super(ConvDeconvVAE, self).__init__()
+        self.embeddings = nn.Embedding(num_embeddings, embedding_dim)
+        self.embeddings.weight.data.uniform_(-1/self.num_embeddings, 1/self.num_embeddings)
+
+    def forward(self, inputs):
+        # Flatten the input
+        input_shape = inputs.shape
+        flat_input = inputs.view(-1, self.embedding_dim)
+
+        # Calculate distances to embedding vectors
+        distances = (torch.sum(flat_input**2, dim=1, keepdim=True)
+                     + torch.sum(self.embeddings.weight**2, dim=1)
+                     - 2 * torch.matmul(flat_input, self.embeddings.weight.t()))
+
+        # Get the closest embedding indices
+        encoding_indices = torch.argmin(distances, dim=1).unsqueeze(1)
+        encodings = torch.zeros(encoding_indices.size(0), self.num_embeddings, device=inputs.device)
+        encodings.scatter_(1, encoding_indices, 1)
+
+        # Quantize the input
+        quantized = torch.matmul(encodings, self.embeddings.weight).view(input_shape)
+
+        # Compute loss for embedding
+        e_latent_loss = F.mse_loss(quantized.detach(), inputs)
+        q_latent_loss = F.mse_loss(quantized, inputs.detach())
+        loss = q_latent_loss + self.commitment_cost * e_latent_loss
+
+        # Preserve gradients
+        quantized = inputs + (quantized - inputs).detach()
+
+        return quantized, loss, encoding_indices
+
+class ConvDeconvVQVAE(nn.Module):
+    def __init__(self, image_channels=3, image_size=64, latent_size=256, hidden_dim=512, num_embeddings=512, commitment_cost=0.25, learning_rate=1e-3):
+        super(ConvDeconvVQVAE, self).__init__()
         self.latent_size = latent_size
         self.hidden_dim = hidden_dim
-        self.instrument_units = instrument_units
-        self.pitch_units = pitch_units
-        self.song_length = song_length
-
-        input_shape = (self.pitch_units, self.song_length, self.instrument_units)
-        flattened_dim = self.pitch_units * self.song_length * self.instrument_units
-
-        if (instrument_units == 1):
-            self.input_shape = (self.pitch_units, self.song_length)
-            flattened_dim = self.pitch_units * self.song_length
 
         # Encoder
         self.encoder = nn.Sequential(
-            nn.Conv2d(12, 12, kernel_size=8, stride=2, padding="same"),
+            nn.Conv2d(image_channels, 32, kernel_size=4, stride=2, padding=1),  # (B, 32, 32, 32)
             nn.LeakyReLU(0.2),
-            nn.BatchNorm2d(12),
-            nn.Conv2d(12, 12, kernel_size=8, stride=(1, 2), padding="same"),
+            nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1),  # (B, 64, 16, 16)
             nn.LeakyReLU(0.2),
-            nn.BatchNorm2d(12),
-            nn.Conv2d(12, 12, kernel_size=4, padding="same"),
+            nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1),  # (B, 128, 8, 8)
             nn.LeakyReLU(0.2),
-            nn.BatchNorm2d(12),
-            nn.Flatten(),
-            nn.Linear(flattened_dim, hidden_dim * 2),
+            nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1),  # (B, 256, 4, 4)
+            nn.LeakyReLU(0.2),
+            nn.Flatten(),  # (B, 256*4*4)
+            nn.Linear(256 * 4 * 4, hidden_dim),
             nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim * 2, hidden_dim * 2),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim * 2, hidden_dim),
         )
+
+        # VQ layer
+        self.vq_layer = VectorQuantizer(num_embeddings, hidden_dim, commitment_cost)
 
         # Decoder
         self.decoder = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim * 2),
+            nn.Linear(hidden_dim, 256 * 4 * 4),
             nn.ReLU(inplace=True),
-            nn.BatchNorm2d(hidden_dim * 2),
-            nn.Linear(hidden_dim * 2, 1440),
+            nn.Unflatten(1, (256, 4, 4)),  # (B, 256, 4, 4)
+            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),  # (B, 128, 8, 8)
             nn.ReLU(inplace=True),
-            nn.BatchNorm2d(1440),
-            nn.Unflatten(1, (6, 80, 3)),
-            nn.ConvTranspose2d(3, 12, kernel_size=8, stride=2, padding="same"),
-            nn.LeakyReLU(0.2),
-            nn.BatchNorm2d(12),
-            nn.ConvTranspose2d(3, 12, kernel_size=8, stride=(1, 2), padding="same"),
-            nn.LeakyReLU(0.2),
-            nn.Sigmoid(),
-            nn.ConvTranspose2d(3, instrument_units, kernel_size=4, padding="same"),
+            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),  # (B, 64, 16, 16)
+            nn.ReLU(inplace=True),
+            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),  # (B, 32, 32, 32)
+            nn.ReLU(inplace=True),
+            nn.ConvTranspose2d(32, image_channels, kernel_size=4, stride=2, padding=1),  # (B, image_channels, 64, 64)
+            nn.Sigmoid(),  # To get pixel values between 0 and 1
         )
 
-        self.mu_layer = nn.Linear(hidden_dim, latent_size)
-        self.logvar_layer = nn.Linear(hidden_dim, latent_size)
         self.optimizer = torch.optim.Adam(self.parameters(), lr=learning_rate)
-
-    def reparameterize(self, mu, logvar):
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        return mu + eps * std
 
     def forward(self, x):
         latent = self.encoder(x)
-        mu = self.mu_layer(latent)
-        logvar = self.logvar_layer(latent)
-        z = self.reparameterize(mu, logvar)
-        x_hat = self.decoder(z)
-        return x_hat, mu, logvar, z
+        quantized, vq_loss, _ = self.vq_layer(latent)
+        x_hat = self.decoder(quantized)
+        return x_hat, vq_loss
 
-    def get_latent_encoding(self, x):
-        z = self.forward(x)[3]
-        return z
-
-    def predict(self, x):
-        x_hat = self.forward(x)[0]
+    def reconstruct(self, x):
+        x_hat, _ = self.forward(x)
         return x_hat
 
-    def bce_loss(self, x_hat, x):
-        """
-        Computes the reconstruction loss of the VAE.
+    def get_latent_codes(self, x):
+        latent = self.encoder(x)
+        _, _, encoding_indices = self.vq_layer(latent)
+        return encoding_indices
 
-        Args:
-            x_hat: Reconstructed input data of shape (N, C, H, W).
-            x: Input data for this timestep of shape (N, C, H, W).
-
-        Returns:
-            reconstruction_loss: Tensor containing the scalar loss for the reconstruction loss term.
-        """
-        bce = F.binary_cross_entropy(x_hat, x, reduction="sum")
-        return bce * x.size(1)  # Sum over all channels
-
-    def loss_function(self, x_hat, x, mu, logvar):
-        """
-        Computes the negative variational lower bound loss term of the VAE.
-
-        Args:
-            x_hat: Reconstructed input data of shape (N, C, H, W).
-            x: Input data for this timestep of shape (N, C, H, W).
-            mu: Matrix representing estimated posterior mu (N, Z), with Z latent space dimension.
-            logvar: Matrix representing estimated variance in log-space (N, Z), with Z latent space dimension.
-
-        Returns:
-            loss: Tensor containing the scalar loss for the negative variational lowerbound.
-        """
-        reconstruction_loss = self.bce_loss(x_hat, x)
-        kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-        loss = reconstruction_loss + kl_loss
-        return loss / x.size(0)  # Average loss per sample
-
+# Example usage:
+vqvae = ConvDeconvVQVAE()
+image = torch.randn((1, 3, 64, 64))  # Batch of one 64x64 RGB image
+reconstructed_image, vq_loss = vqvae(image)
+print(reconstructed_image.shape)  # Should output torch.Size([1, 3, 64, 64])
+print(vq_loss)  # Vector quantization loss
