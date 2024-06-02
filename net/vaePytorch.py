@@ -17,9 +17,7 @@ class VectorQuantizer(nn.Module):
         flat_input = inputs.view(-1, self.embedding_dim)
 
         # Calculate distances to embedding vectors
-        distances = (torch.sum(flat_input**2, dim=1, keepdim=True)
-                     + torch.sum(self.embeddings.weight**2, dim=1)
-                     - 2 * torch.matmul(flat_input, self.embeddings.weight.t()))
+        distances = torch.sum((self.embeddings-flat_input)**2)**0.5
 
         # Get the closest embedding indices
         encoding_indices = torch.argmin(distances, dim=1).unsqueeze(1)
@@ -31,6 +29,7 @@ class VectorQuantizer(nn.Module):
 
         # Compute loss for embedding
         e_latent_loss = F.mse_loss(quantized.detach(), inputs)
+        #fucked up
         q_latent_loss = F.mse_loss(quantized, inputs.detach())
         loss = q_latent_loss + self.commitment_cost * e_latent_loss
 
