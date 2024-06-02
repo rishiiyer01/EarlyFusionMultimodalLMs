@@ -1,6 +1,9 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
+
+
+
 class VectorQuantizer(nn.Module):
     def __init__(self, num_embeddings, embedding_dim, commitment_cost):
         super(VectorQuantizer, self).__init__()
@@ -17,9 +20,11 @@ class VectorQuantizer(nn.Module):
         flat_input = inputs.view(-1, self.embedding_dim)
 
         # Calculate distances to embedding vectors
-        distances = torch.sum((self.embeddings-flat_input)**2)**0.5
-
+        
+        distances = torch.sum((self.embeddings.weight-flat_input)**2)**0.5
+        print(distances.shape) #should be of size num_embeddings,1
         # Get the closest embedding indices
+        #error right here
         encoding_indices = torch.argmin(distances, dim=1).unsqueeze(1)
         encodings = torch.zeros(encoding_indices.size(0), self.num_embeddings, device=inputs.device)
         encodings.scatter_(1, encoding_indices, 1)
