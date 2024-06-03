@@ -40,4 +40,5 @@ class myLoss(nn.module):
         loss = reconstruction_loss + kl_loss
         #we can actually save memory by separating out this loss function and calling backwards on each of them independently probably, but that can be implemented a lil later
         #for now this is probably fine
+        return loss
 
