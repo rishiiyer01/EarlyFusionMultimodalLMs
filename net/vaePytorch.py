@@ -95,6 +95,43 @@ class ConvDeconvVQVAE(nn.Module):
         _, _, encoding_indices = self.vq_layer(latent)
         return encoding_indices
 
+class PatchEmbedding(nn.Module):
+    def __init__(self, image_size, patch_size, in_channels, embed_dim):
+        super(PatchEmbedding, self).__init__()
+        self.patch_size = patch_size
+        self.embed_dim = embed_dim
+        self.n_patches = (image_size // patch_size) ** 2
+
+        self.proj = nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size)
+
+    def forward(self, x):
+        x = self.proj(x)  # (B, embed_dim, n_patches**0.5, n_patches**0.5)
+        x = x.flatten(2)  # (B, embed_dim, n_patches)
+        x = x.transpose(1, 2)  # (B, n_patches, embed_dim)
+        return x
+
+
+class ViTEncoder(nn.Module):
+    def __init__(self, embed_dim, depth, num_heads, mlp_ratio=4., dropout=0.1):
+        super(ViTEncoder, self).__init__()
+        self.layers = nn.ModuleList([
+            nn.TransformerEncoderLayer(
+                d_model=embed_dim,
+                nhead=num_heads,
+                dim_feedforward=int(embed_dim * mlp_ratio),
+                dropout=dropout,
+                activation='gelu'
+            ) for _ in range(depth)
+        ])
+        self.norm = nn.LayerNorm(embed_dim)
+
+    def forward(self, x):
+        for layer in self.layers:
+            x = layer(x)
+        x = self.norm(x)
+        return x
+    
+
 
 class ViTVQVAE(nn.Module):
     def __init__(self, image_size=512, patch_size=32, in_channels=3, embed_dim=256, num_embeddings=8192, depth=6, num_heads=8, commitment_cost=0.25, learning_rate=1e-3):
