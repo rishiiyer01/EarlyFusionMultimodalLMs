@@ -19,11 +19,7 @@ class VectorQuantizer(nn.Module):
         flat_input = inputs.view(-1, self.embedding_dim)
 
         # Calculate distances to embedding vectors using broadcasting
-        embeddings_expanded = self.embeddings.weight.unsqueeze(0)  # Shape: (1, num_embeddings, embedding_dim)
-        flat_input_expanded = flat_input.unsqueeze(1)  # Shape: (batch_size * num_latents, 1, embedding_dim)
-
-        distances = torch.sum((flat_input_expanded - embeddings_expanded) ** 2, dim=2)  # Shape: (batch_size * num_latents, num_embeddings)
-
+        distances = torch.sum((flat_input.unsqueeze(1) - self.embeddings.weight) ** 2, dim=2)
 
         # Get the closest embedding indices
         encoding_indices = torch.argmin(distances, dim=1).unsqueeze(1)
@@ -99,6 +95,72 @@ class ConvDeconvVQVAE(nn.Module):
         _, _, encoding_indices = self.vq_layer(latent)
         return encoding_indices
 
+
+class ViTVQVAE(nn.Module):
+    def __init__(self, image_size=512, patch_size=32, in_channels=3, embed_dim=256, num_embeddings=8192, depth=6, num_heads=8, commitment_cost=0.25, learning_rate=1e-3):
+        super(ViTVQVAE, self).__init__()
+        self.image_size = image_size
+        self.patch_size = patch_size
+        self.embed_dim = embed_dim
+        self.num_patches = (image_size // patch_size) ** 2
+
+        # Patch Embedding
+        self.patch_embed = PatchEmbedding(image_size, patch_size, in_channels, embed_dim)
+
+        # Transformer Encoder
+        self.encoder = ViTEncoder(embed_dim, depth, num_heads)
+
+        # Vector Quantizer
+        self.vq_layer = VectorQuantizer(num_embeddings, embed_dim, commitment_cost)
+
+        # Decoder
+        self.decoder = nn.Sequential(
+            nn.ConvTranspose2d(embed_dim, 256, kernel_size=4, stride=2, padding=1),  # (B, 256, 64, 64)
+            nn.ReLU(inplace=True),
+            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),  # (B, 128, 128, 128)
+            nn.ReLU(inplace=True),
+            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),  # (B, 64, 256, 256)
+            nn.ReLU(inplace=True),
+            nn.ConvTranspose2d(64, in_channels, kernel_size=4, stride=2, padding=1),  # (B, in_channels, 512, 512)
+            nn.Sigmoid(),  # To get pixel values between 0 and 1
+        )
+
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=learning_rate)
+
+    def forward(self, x):
+        batch_size = x.size(0)
+
+        # Encode
+        patches = self.patch_embed(x)  # (B, n_patches, embed_dim)
+        encoded_patches = self.encoder(patches)  # (B, n_patches, embed_dim)
+
+        # Quantize
+        quantized, vq_loss, _ = self.vq_layer(encoded_patches)  # (B, n_patches, embed_dim)
+
+        # Reshape for decoder
+        quantized = quantized.permute(0, 2, 1).contiguous()  # (B, embed_dim, n_patches)
+        quantized = quantized.view(batch_size, self.embed_dim, self.image_size // self.patch_size, self.image_size // self.patch_size)  # (B, embed_dim, h, w)
+
+        # Decode
+        x_hat = self.decoder(quantized)  # (B, in_channels, 512, 512)
+        return x_hat, vq_loss
+
+    def reconstruct(self, x):
+        x_hat, _ = self.forward(x)
+        return x_hat
+
+    def get_latent_codes(self, x):
+        patches = self.patch_embed(x)  # (B, n_patches, embed_dim)
+        encoded_patches = self.encoder(patches)  # (B, n_patches, embed_dim)
+        _, _, encoding_indices = self.vq_layer(encoded_patches)
+        return encoding_indices
+
+# Example usage:
+vit_vqvae = ViTVQVAE()
+image = torch.randn((2, 3, 512, 512))  # Batch of 2 512x512 RGB images
+reconstructed_image, vq_loss = vit_vqvae(image)
+print(reconstructed_image.shape)  # Should output torch.Size([2, 3, 512, 512])
+print(vq_loss)  # Vector quantization loss
 # Example usage:
 #vqvae = ConvDeconvVQVAE()
 #image = torch.randn((2, 3, 32, 32))  # Batch of 2 64x64 RGB images
