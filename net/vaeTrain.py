@@ -16,7 +16,12 @@ else:
 torch.manual_seed(0)
 torch.cuda.manual_seed(0)
 torch.backends.cudnn.deterministic = True
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+# Check GPU availability
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+num_gpus = torch.cuda.device_count()
+print(f"Using device: {device}")
+print(f"Number of available GPUs: {num_gpus}")
+
 
 
 
@@ -27,31 +32,15 @@ def count_params(model):
     return c
 
 #dataloader needs to be defined
-batch_size = 16
-from PIL import Image
-from torchvision.datasets import ImageFolder
-
+batch_size = 32
+from datasets import load_dataset
+ds=load_dataset("imagenet-1k")
+train_dataset = ds['train']
+validation_dataset = ds['validation']
 from torch.utils.data import Dataset
 from torchvision import transforms
 import os
-class ImageNetValidation(Dataset):
-    def __init__(self, root_dir, transform=None):
-        self.root_dir = root_dir
-        self.transform = transform
-        self.image_files = [f for f in os.listdir(root_dir) if f.endswith('.JPEG')]
 
-    def __len__(self):
-        return len(self.image_files)
-
-    def __getitem__(self, idx):
-        img_name = os.path.join(self.root_dir, self.image_files[idx])
-        image = Image.open(img_name).convert('RGB')
-        
-        if self.transform:
-            image = self.transform(image)
-        
-        # Return 0 as a dummy label
-        return image, 0
 
 # Define your transforms
 transform = transforms.Compose([
@@ -61,24 +50,41 @@ transform = transforms.Compose([
     transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
 ])
 
-# Paths to your data
-imagenet_path = "/datasets/imageNet/ILSVRC/Data/CLS-LOC"
-train_dir = os.path.join(imagenet_path, "train")
-val_dir = os.path.join(imagenet_path, "val")
+num_workers=2*num_gpus
+class HFDataset(torch.utils.data.Dataset):
+    def __init__(self, hf_dataset, transform=None):
+        self.hf_dataset = hf_dataset
+        self.transform = transform
 
-# For training set
-trainset = ImageFolder(train_dir, transform=transform)
-trainloader = torch.utils.data.DataLoader(trainset, batch_size=batch_size,
-                                          shuffle=True, num_workers=2)
+    def __len__(self):
+        return len(self.hf_dataset)
 
-# For validation set
-testset = ImageNetValidation(val_dir, transform=transform)
-testloader = torch.utils.data.DataLoader(testset, batch_size=batch_size,
-                                         shuffle=False, num_workers=2)
-model=VQVAE().to(device)
+    def __getitem__(self, idx):
+        item = self.hf_dataset[idx]
+        image = item['image'].convert('RGB')  # Ensure image is in RGB format
+        label = item['label']
+
+        if self.transform:
+            image = self.transform(image)
+
+        return image, label
+
+# Create PyTorch datasets
+train_dataset = HFDataset(ds['train'], transform=transform)
+test_dataset = HFDataset(ds['validation'], transform=transform)
+
+# Create data loaders
+train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=num_workers)
+test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False, num_workers=num_workers)
+
+
+model=VQVAE()
+if num_gpus > 1:
+    model = nn.DataParallel(model)
+model = model.to(device)
 ##hps for the graddescent
 
-learning_rate = 0.001
+learning_rate = 0.001* num_gpus
 
 epochs = 20
 step_size =5
@@ -153,7 +159,9 @@ for epoch in range(num_epochs):
     t2 = default_timer()
     print(f'Epoch {epoch+1}, Time: {t2 - t1:.2f}s, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}')
     if (epoch + 1) % step_size == 0:
-        torch.save(model, f'/home/iyer.ris/vqvae/convarc_{epoch+1}.pth')
-
+        if isinstance(model, nn.DataParallel):
+            torch.save(model.module.state_dict(), f'/home/iyer.ris/vqvae/convarc_{epoch+1}.pth')
+        else:
+            torch.save(model.state_dict(), f'/home/iyer.ris/vqvae/convarc_{epoch+1}.pth')
 
 
