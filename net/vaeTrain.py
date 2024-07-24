@@ -3,7 +3,7 @@ import torch
 import wandb
 from torch import nn
 from torch.nn import functional as F
-from vaePytorch import ConvDeconvVQVAE
+from vaePytorch import VQVAE
 from functools import reduce
 import torchvision
 import torchvision.transforms as transforms
@@ -18,9 +18,6 @@ torch.cuda.manual_seed(0)
 torch.backends.cudnn.deterministic = True
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-transform = transforms.Compose(
-    [transforms.ToTensor(),
-     transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
 
 
 def count_params(model):
@@ -30,24 +27,60 @@ def count_params(model):
     return c
 
 #dataloader needs to be defined
-batch_size = 4
+batch_size = 16
+from PIL import Image
+from torchvision.datasets import ImageFolder
 
-trainset = torchvision.datasets.CIFAR10(root='./data', train=True,
-                                        download=True, transform=transform)
+from torch.utils.data import Dataset
+from torchvision import transforms
+import os
+class ImageNetValidation(Dataset):
+    def __init__(self, root_dir, transform=None):
+        self.root_dir = root_dir
+        self.transform = transform
+        self.image_files = [f for f in os.listdir(root_dir) if f.endswith('.JPEG')]
+
+    def __len__(self):
+        return len(self.image_files)
+
+    def __getitem__(self, idx):
+        img_name = os.path.join(self.root_dir, self.image_files[idx])
+        image = Image.open(img_name).convert('RGB')
+        
+        if self.transform:
+            image = self.transform(image)
+        
+        # Return 0 as a dummy label
+        return image, 0
+
+# Define your transforms
+transform = transforms.Compose([
+    transforms.Resize(256),
+    transforms.CenterCrop(224),
+    transforms.ToTensor(),
+    transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+])
+
+# Paths to your data
+imagenet_path = "/datasets/imageNet/ILSVRC/Data/CLS-LOC"
+train_dir = os.path.join(imagenet_path, "train")
+val_dir = os.path.join(imagenet_path, "val")
+
+# For training set
+trainset = ImageFolder(train_dir, transform=transform)
 trainloader = torch.utils.data.DataLoader(trainset, batch_size=batch_size,
                                           shuffle=True, num_workers=2)
 
-testset = torchvision.datasets.CIFAR10(root='./data', train=False,
-                                       download=True, transform=transform)
+# For validation set
+testset = ImageNetValidation(val_dir, transform=transform)
 testloader = torch.utils.data.DataLoader(testset, batch_size=batch_size,
                                          shuffle=False, num_workers=2)
-
-model=ConvDeconvVQVAE().to(device)
+model=VQVAE().to(device)
 ##hps for the graddescent
-batch_size = 2
+
 learning_rate = 0.001
 
-epochs = 70
+epochs = 20
 step_size =5
 gamma = 0.5
 optimizer = torch.optim.Adagrad(model.parameters(), lr=learning_rate)
@@ -119,8 +152,8 @@ for epoch in range(num_epochs):
     
     t2 = default_timer()
     print(f'Epoch {epoch+1}, Time: {t2 - t1:.2f}s, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}')
-    if ep % step_size == 5:
-        torch.save(model, '/home/iyer.ris/vqvae/convarc_' + str(ep))
+    if (epoch + 1) % step_size == 0:
+        torch.save(model, f'/home/iyer.ris/vqvae/convarc_{epoch+1}.pth')
 
 
 
